@@ -38,10 +38,17 @@ def fetch_ads(order: str) -> list[dict]:
     data = resp.json()
     responses = data.get("responses", [])
 
-    # The ads response is the last one (index -1); hits are under hits.hits
+    # get the ads from the right response based on the order
     ads_response = responses[-1]
     hits = ads_response.get("hits", {}).get("hits", [])
-    return [hit["_source"] for hit in hits]
+    hits = [hit["_source"] for hit in hits]
+    elite_hits = responses[1].get('hits', {}).get('hits', [])
+    elite_hits = [hit['_source'] for hit in elite_hits]
+    featured_hits = responses[2].get('hits', {}).get('hits', [])
+    featured_hits = [hit['_source'] for hit in featured_hits]
+    hits.extend(elite_hits)
+    hits.extend(featured_hits)
+    return hits
 
 
 def save_to_s3(cars: list[dict], label: str) -> str:
@@ -69,11 +76,16 @@ def lambda_handler(event, context):
     print("Fetching oldest cars …")
     oldest = fetch_ads("asc")
     print(f"  → {len(oldest)} ads from oldest call")
+    
+    print("Fetching featured cars …")
+    featured = fetch_ads("featured")
+    print(f"  → {len(featured)} ads from featured call")
 
     key = save_to_s3(oldest, "oldest_cars")
     print(f"Saved to s3://{S3_BUCKET}/{key}")
     key = save_to_s3(newest, "newest_cars")
     print(f"Saved to s3://{S3_BUCKET}/{key}")
+
     return {
         "statusCode": 200,
         "body": json.dumps({
