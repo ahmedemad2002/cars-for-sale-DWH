@@ -51,7 +51,7 @@ def transform(cars: list):
 
         # Fill in actual values
         for field in car.get('formattedExtraFields', []):
-            t_car[field['name_l1']] = field['formattedValue']
+            t_car[field['name_l1']] = field['formattedValue_l1']
 
         t_car['createdAt'] = car.get('createdAt')
         t_car['updatedAt'] = car.get('updatedAt')
@@ -59,7 +59,7 @@ def transform(cars: list):
         t_car['_ingestionDate'] = TODAY_STR
         transformed_cars.append(t_car)
 
-    return transformed_cars
+    return transformed_cars, all_keys
 
 def save_silver(cars: list, day_string=TODAY_STR):
     SILVER_BUCKET_NAME = os.environ['SILVER_BUCKET_NAME']
@@ -94,12 +94,13 @@ def save_silver(cars: list, day_string=TODAY_STR):
 def lambda_handler(event, context):
     new_cars, old_cars = extract_bronze()
     cars = deduplicate(new_cars, old_cars)
-    cars = transform(cars)
+    cars, all_keys = transform(cars)
     
     csv_key, json_key = save_silver(cars)
 
     body = {
         "n_cars": len(cars),
+        "all_keys": list(all_keys),
         'example_car': cars[0] if len(cars) > 0 else None,
         'silver_csv_key': csv_key,
         'silver_json_key': json_key
