@@ -77,9 +77,6 @@ def lambda_handler(event, context):
     oldest = fetch_ads("asc")
     print(f"  → {len(oldest)} ads from oldest call")
     
-    print("Fetching featured cars …")
-    featured = fetch_ads("featured")
-    print(f"  → {len(featured)} ads from featured call")
 
     key = save_to_s3(oldest, "oldest_cars")
     print(f"Saved to s3://{S3_BUCKET}/{key}")
