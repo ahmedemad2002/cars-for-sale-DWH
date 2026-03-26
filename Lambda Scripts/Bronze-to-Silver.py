@@ -48,11 +48,16 @@ def transform(cars: list):
         # Initialize all possible keys to None
         for key in all_keys:
             t_car.setdefault(key, None)
-
         # Fill in actual values
         for field in car.get('formattedExtraFields', []):
             t_car[field['name_l1']] = field['formattedValue_l1']
-
+        # Process extra features
+        if t_car.get('Extra Features') is not None:
+            for feature in t_car.get('Extra Features', ["No Extra Features"]):
+                t_car[f"feature_{feature}"] = True
+        # delete the original list of features to avoid redundancy
+        t_car.pop('Extra Features', None)
+        t_car.pop('Car Category', None)
         t_car['createdAt'] = car.get('createdAt')
         t_car['updatedAt'] = car.get('updatedAt')
         t_car['_sourceURL'] = f"https://www.dubizzle.com.eg/ad/{car.get('slug_l1')}-ID{car['externalID']}.html"
