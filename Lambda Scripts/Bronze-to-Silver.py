@@ -66,51 +66,112 @@ def transform(cars: list):
 
     return transformed_cars, all_keys
 
-def save_silver(cars: list, day_string=TODAY_STR):
+def change_dtypes(cars: list) -> pd.DataFrame:
+    for car in cars:
+        if car.get('createdAt') is not None:
+            car['createdAt'] = datetime.fromtimestamp(car['createdAt'], tz=timezone.utc).isoformat()
+        if car.get('updatedAt') is not None:
+            car['updatedAt'] = datetime.fromtimestamp(car['updatedAt'], tz=timezone.utc).isoformat()
+        car['Price'] = int(car['Price'].replace(',', '').split('.')[0]) if car.get('Price') is not None else None
+
+    df = pd.DataFrame(cars)
+
+    feature_cols = [c for c in df.columns if c.startswith('feature_')]
+    for col in feature_cols:
+        df[col] = df[col].astype('boolean')
+
+    numeric_cols = [
+        'Year', 'Price', 'Kilometers', 'Down Payment',
+        'Power (hp)', 'Engine Capacity (CC)',
+        'Consumption (l/100 km)', 'Number of seats', 'Number of Owners',
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype('Float64')
+
+    return df
+
+
+def save_silver(df: pd.DataFrame, cars: list, day_string=TODAY_STR):
     SILVER_BUCKET_NAME = os.environ['SILVER_BUCKET_NAME']
 
-    # CSV upload
-    df = pd.DataFrame(cars)
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
-
-    csv_key = f'ingestion_date={day_string}/cars.csv'
+    # Parquet — from typed df
+    parquet_buffer = io.BytesIO()
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    pq.write_table(table, parquet_buffer, compression='snappy')
+    parquet_buffer.seek(0)
+    parquet_key = f'ingestion_date={day_string}/cars.parquet'
     s3.put_object(
         Bucket=SILVER_BUCKET_NAME,
-        Key=csv_key,
-        Body=csv_buffer.getvalue().encode('utf-8'),
-        ContentType='text/csv'
+        Key=parquet_key,
+        Body=parquet_buffer.getvalue(),
+        ContentType='application/octet-stream'
     )
 
-    # JSON upload (same data in JSON format)
-    json_buffer = io.StringIO()
-    json.dump(cars, json_buffer, default=str, ensure_ascii=False)
+    return parquet_key
 
-    json_key = f'ingestion_date={day_string}/cars.json'
-    s3.put_object(
-        Bucket=SILVER_BUCKET_NAME,
-        Key=json_key,
-        Body=json_buffer.getvalue().encode('utf-8'),
-        ContentType='application/json'
-    )
-
-    return csv_key, json_key
 
 def lambda_handler(event, context):
-    new_cars, old_cars = extract_bronze()
-    cars = deduplicate(new_cars, old_cars)
-    cars, all_keys = transform(cars)
-    
-    csv_key, json_key = save_silver(cars)
+    # ── Resolve date range from event ─────────────────────────────────────────
+    # Normal daily run:   event = {}  → processes today only
+    # Backfill:           event = {"start_date": "2026-03-23", "end_date": "2026-03-26"}
+    # Single day:         event = {"start_date": "2026-03-23", "end_date": "2026-03-23"}
 
-    body = {
-        "n_cars": len(cars),
-        "all_keys": list(all_keys),
-        'example_car': cars[0] if len(cars) > 0 else None,
-        'silver_csv_key': csv_key,
-        'silver_json_key': json_key
-    }
+    today = datetime.now(timezone.utc).date()
+
+    start_date = datetime.strptime(
+        event.get('start_date', str(today)), "%Y-%m-%d"
+    ).date()
+    end_date = datetime.strptime(
+        event.get('end_date', str(today)), "%Y-%m-%d"
+    ).date()
+
+    if start_date > end_date:
+        raise ValueError(f"start_date {start_date} is after end_date {end_date}")
+
+    # ── Build list of dates to process ───────────────────────────────────────
+    from datetime import timedelta
+    dates = []
+    current = start_date
+    while current <= end_date:
+        dates.append(str(current))
+        current += timedelta(days=1)
+
+    print(f"Processing {len(dates)} day(s): {dates[0]} → {dates[-1]}")
+
+    # ── Process each day ─────────────────────────────────────────────────────
+    results = []
+    for day_string in dates:
+        print(f"  Processing {day_string} ...")
+        try:
+            new_cars, old_cars = extract_bronze(day_string)
+            cars = deduplicate(new_cars, old_cars)
+            cars, all_keys = transform(cars)
+            df = change_dtypes(cars)
+            parquet_key = save_silver(df, cars, day_string)
+
+            results.append({
+                'date': day_string,
+                'status': 'success',
+                'n_cars': len(cars),
+                'parquet_key': parquet_key,
+            })
+            print(f"  ✓ {day_string} — {len(cars)} cars")
+
+        except Exception as e:
+            # Don't stop the whole backfill if one day fails
+            results.append({
+                'date': day_string,
+                'status': 'failed',
+                'error': str(e),
+            })
+            print(f"  ✗ {day_string} — {str(e)}")
+
     return {
         'statusCode': 200,
-        'body': body,
+        'body': {
+            'processed': len([r for r in results if r['status'] == 'success']),
+            'failed': len([r for r in results if r['status'] == 'failed']),
+            'results': results,
+        }
     }
