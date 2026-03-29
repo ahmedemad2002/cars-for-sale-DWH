@@ -242,6 +242,9 @@ def lambda_handler(event, context):
         print(f"\n── {day_string} ──────────────────────────────────────────")
         try:
             df_silver = read_silver(day_string)
+            df_silver = df_silver.sort_values('updatedAt', ascending=False).drop_duplicates(
+                subset='id', keep='first'
+            )
             print(f"  Silver rows : {len(df_silver)}")
 
             df_gold = read_gold()
