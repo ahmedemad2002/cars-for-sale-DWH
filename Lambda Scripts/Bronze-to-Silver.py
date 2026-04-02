@@ -8,9 +8,8 @@ import os
 import io
 
 s3 = boto3.client('s3')
-TODAY_STR = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-def extract_bronze(day_string=TODAY_STR):
+def extract_bronze(day_string):
     BRONZE_BUCKET_NAME = os.environ['BRONZE_BUCKET_NAME']
     BRONZE_DATA_PATH = os.environ['BRONZE_DATA_PATH']
     newest_key = BRONZE_DATA_PATH + f'/{day_string}/newest_cars.json'
@@ -21,7 +20,7 @@ def extract_bronze(day_string=TODAY_STR):
     oldest = json.loads(oldest["Body"].read())
     return (newest, oldest)
 
-def deduplicate(new_cars: list, old_cars: list):
+def merge_cars(new_cars: list, old_cars: list):
     new_cars = new_cars.get('cars')
     old_cars = old_cars.get('cars')
     new_ids = [car.get('id') for car in new_cars]
@@ -29,7 +28,7 @@ def deduplicate(new_cars: list, old_cars: list):
     new_cars.extend(old_cars)
     return new_cars
 
-def transform(cars: list):
+def transform(cars: list, TODAY_STR: str):
     # Compute all keys once, before the loop
     all_keys = set()
     for car in cars:
@@ -75,7 +74,7 @@ def change_dtypes(cars: list) -> pd.DataFrame:
         car['Price'] = int(car['Price'].replace(',', '').split('.')[0]) if car.get('Price') is not None else None
 
     df = pd.DataFrame(cars)
-
+    df.drop_duplicates(subset=['id'], inplace=True)
     feature_cols = [c for c in df.columns if c.startswith('feature_')]
     for col in feature_cols:
         df[col] = df[col].astype('boolean')
@@ -92,7 +91,7 @@ def change_dtypes(cars: list) -> pd.DataFrame:
     return df
 
 
-def save_silver(df: pd.DataFrame, cars: list, day_string=TODAY_STR):
+def save_silver(df: pd.DataFrame, cars: list, day_string):
     SILVER_BUCKET_NAME = os.environ['SILVER_BUCKET_NAME']
 
     # Parquet — from typed df
@@ -145,8 +144,8 @@ def lambda_handler(event, context):
         print(f"  Processing {day_string} ...")
         try:
             new_cars, old_cars = extract_bronze(day_string)
-            cars = deduplicate(new_cars, old_cars)
-            cars, all_keys = transform(cars)
+            cars = merge_cars(new_cars, old_cars)
+            cars, all_keys = transform(cars, day_string)
             df = change_dtypes(cars)
             parquet_key = save_silver(df, cars, day_string)
 
