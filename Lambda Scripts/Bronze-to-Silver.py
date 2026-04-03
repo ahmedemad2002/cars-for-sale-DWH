@@ -8,6 +8,17 @@ import os
 import io
 
 s3 = boto3.client('s3')
+lambda_client = boto3.client('lambda')
+
+def invoke_next(function_name: str, payload: dict):
+    """Fire-and-forget async invoke of the next Lambda in the chain."""
+    lambda_client.invoke(
+        FunctionName=function_name,
+        InvocationType='Event',          # async — ScrapeDay doesn't wait
+        Payload=json.dumps(payload).encode()
+    )
+    print(f"  → Invoked {function_name} asynchronously")
+
 
 def extract_bronze(day_string):
     BRONZE_BUCKET_NAME = os.environ['BRONZE_BUCKET_NAME']
@@ -166,11 +177,34 @@ def lambda_handler(event, context):
             })
             print(f"  ✗ {day_string} — {str(e)}")
 
+# ── Sanity check before handing off to Gold ───────────────────────────────
+    successful_days = [r for r in results if r['status'] == 'success']
+    failed_days     = [r for r in results if r['status'] == 'failed']
+
+    ROW_THRESHOLD = int(os.environ.get('MIN_SILVER_ROWS', '500'))
+    thin_days = [r for r in successful_days if r['n_cars'] < ROW_THRESHOLD]
+
+    if failed_days or thin_days:
+        print(f"  ⚠ Skipping Gold invocation — "
+              f"{len(failed_days)} failed day(s), "
+              f"{len(thin_days)} day(s) below {ROW_THRESHOLD}-row threshold")
+    else:
+        s2g_function = os.environ.get('SILVER_TO_GOLD_FUNCTION_NAME')
+        if s2g_function:
+            # Pass the same date range forward so Gold processes the same window
+            gold_payload = {
+                'start_date': dates[0],
+                'end_date':   dates[-1],
+            }
+            invoke_next(s2g_function, gold_payload)
+        else:
+            print("  ⚠ SILVER_TO_GOLD_FUNCTION_NAME not set — skipping chain")
+
     return {
         'statusCode': 200,
         'body': {
-            'processed': len([r for r in results if r['status'] == 'success']),
-            'failed': len([r for r in results if r['status'] == 'failed']),
-            'results': results,
+            'processed': len(successful_days),
+            'failed':    len(failed_days),
+            'results':   results,
         }
     }

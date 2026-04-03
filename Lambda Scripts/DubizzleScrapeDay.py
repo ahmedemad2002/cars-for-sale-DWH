@@ -6,6 +6,7 @@ import os
 
 # ── Config ────────────────────────────────────────────────────────────────────
 s3 = boto3.client('s3')
+
 def load_config() -> dict:
     bucket = os.environ["BUCKET_NAME"]
     key = f"config.json"
@@ -29,6 +30,16 @@ def build_payload(order: str) -> str:
     return payload
 
 # ── Core helpers ──────────────────────────────────────────────────────────────
+lambda_client = boto3.client('lambda')
+def invoke_next(function_name: str, payload: dict):
+    """Fire-and-forget async invoke of the next Lambda in the chain."""
+    lambda_client.invoke(
+        FunctionName=function_name,
+        InvocationType='Event',          # async — ScrapeDay doesn't wait
+        Payload=json.dumps(payload).encode()
+    )
+    print(f"  → Invoked {function_name} asynchronously")
+
 def fetch_ads(order: str) -> list[dict]:
     """Call the API and return the list of ad _source dicts."""
     payload = build_payload(order)
@@ -82,6 +93,13 @@ def lambda_handler(event, context):
     print(f"Saved to s3://{S3_BUCKET}/{key}")
     key = save_to_s3(newest, "newest_cars")
     print(f"Saved to s3://{S3_BUCKET}/{key}")
+
+    # Chain to next Lambda (Bronze to Silver) if configured
+    b2s_function = os.environ.get('BRONZE_TO_SILVER_FUNCTION_NAME')
+    if b2s_function:
+        invoke_next(b2s_function, {})    # {} = process today by default
+    else:
+        print(" ⚠ BRONZE_TO_SILVER_FUNCTION_NAME not set — skipping chain")
 
     return {
         "statusCode": 200,
