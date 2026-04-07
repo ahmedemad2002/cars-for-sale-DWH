@@ -152,7 +152,7 @@ Once the SCD table is built, Athena views answer questions like:
 
 | Layer | Technology |
 |---|---|
-| Compute | AWS Lambda (Python 3.12) |
+| Compute | AWS Lambda (Python 3.14) |
 | Storage | AWS S3 (Bronze / Silver / Gold buckets) |
 | Query | AWS Athena |
 | Scheduling | Amazon EventBridge |
@@ -166,10 +166,13 @@ Once the SCD table is built, Athena views answer questions like:
 
 ```
 ├── Lambda Scripts/
-│   ├── DubizzleScrapeDay.py      # Scraper: hits Dubizzle API, saves raw JSON to Bronze
-│   ├── Bronze-to-Silver.py       # Transforms & types raw JSON → partitioned Parquet
-│   └── Silver-to-Gold.py         # SCD Type-2 merge into Gold history table
-├── Raw Data/                     # Local sample data (gitignored — too large to commit)
+│   ├── DubizzleScrapeDay.py            # Scraper: hits Dubizzle API, saves raw JSON to Bronze
+│   ├── Bronze-to-Silver.py             # Transforms & types raw JSON → partitioned Parquet
+│   └── Silver-to-Gold.py               # SCD Type-2 merge into Gold history table
+├── Raw Data/                           # Local sample data (gitignored — too large to commit)
+│   ├── [gold_layer_2026-04-05.parquet  # Snapshot of the parquet file saved in gold layer S3 bucket](./Raw%20Data/gold_layer_2026-04-05.parquet)
+│   ├── [gold 2026-04-05.csv            # CSV file to show the data in Excel](./Raw%20Data/gold%202026-04-05.csv)
+│   └── [gold 2026-04-05 sample.csv     # Sample of the CSV file to preview data without download](./Raw%20Data/gold%202026-04-05%20sample.csv)
 └── README.md
 ```
 

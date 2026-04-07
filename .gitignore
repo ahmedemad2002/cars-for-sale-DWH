@@ -16,3 +16,4 @@ config.json
 /testing
 testingConfig.json
 dubizzleRequests.py
+Lambda Scripts\dubizzleLambda10k.py
