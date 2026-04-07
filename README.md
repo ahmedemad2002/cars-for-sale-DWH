@@ -172,7 +172,7 @@ Once the SCD table is built, Athena views answer questions like:
 ├── Raw Data/                          # Local sample data (gitignored — too large to commit)
 │   ├── gold_layer_2026-04-05.parquet  # Snapshot of the parquet file saved in gold layer S3 bucket
 │   ├── gold 2026-04-05.csv            # CSV file to show the data in Excel
-│   └── gold 2026-04-05 sample.csv     # Sample of the CSV file to preview data without download ([Preview](https://github.com/ahmedemad2002/cars-for-sale-DWH/blob/main/Raw%20Data/gold%202026-04-05%20sample.csv))
+│   └── gold 2026-04-05 sample.csv     # Sample of the CSV file to preview data without download
 └── README.md
 ```
 
