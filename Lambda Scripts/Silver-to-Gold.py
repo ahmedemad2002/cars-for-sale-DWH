@@ -181,6 +181,14 @@ def apply_scd(df_silver: pd.DataFrame, df_gold: pd.DataFrame | None, today: str)
 
     return df_gold
 
+# ── Enforce Datatypes ──────────────────────────────────────────────────────────────────────
+def enforce_datatypes(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure key columns have the correct types for storage and querying."""
+    for col in df.columns:
+        if col.startswith('feature_'):
+            df[col] = df[col].astype(pd.BooleanDtype())
+    return df
+
 
 # ── Save ──────────────────────────────────────────────────────────────────────
 def save_gold(df: pd.DataFrame) -> str:
@@ -254,6 +262,7 @@ def lambda_handler(event, context):
                 print(f"  Gold rows   : 0 (first run)")
 
             df_gold = apply_scd(df_silver, df_gold, day_string)
+            df_gold = enforce_datatypes(df_gold)
             gold_path = save_gold(df_gold)
 
             results.append({
