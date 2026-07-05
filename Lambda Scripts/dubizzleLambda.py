@@ -4,8 +4,8 @@ import requests
 from datetime import datetime, timezone
 
 # ── Config ────────────────────────────────────────────────────────────────────
-S3_BUCKET = "your-bucket-name"          # ← change this
-S3_PREFIX = "dubizzle/cars"             # ← folder path inside the bucket
+S3_BUCKET = "your-bucket-name"  # ← change this
+S3_PREFIX = "dubizzle/cars"  # ← folder path inside the bucket
 URL = (
     "https://search.olx.com.eg/_msearch"
     "?filter_path=took%2C*.took%2C*.timed_out%2C*.suggest.*.options.text%2C"
@@ -37,6 +37,7 @@ AGG_LINES = """\
 {"from":40,"size":0,"track_total_hits":200000,"query":{"function_score":{"random_score":{"seed":637},"query":{"bool":{"must":[{"term":{"category.slug":"cars-for-sale"}},{"term":{"product":"featured"}},{"term":{"location.externalID":"0-1"}}]}}}},"sort":["_score"],"timeout":"5s"}
 """
 
+
 def _ads_line(order: str) -> str:
     """Return the ndjson line that fetches 10k ads sorted by timestamp."""
     return (
@@ -48,6 +49,7 @@ def _ads_line(order: str) -> str:
         f'"sort":[{{"timestamp":{{"order":"{order}"}}}},{{"id":{{"order":"{order}"}}}}],'
         '"timeout":"5s"}\n'
     )
+
 
 def build_payload(order: str) -> str:
     return AGG_LINES + _ads_line(order)
@@ -111,10 +113,12 @@ def lambda_handler(event, context):
 
     return {
         "statusCode": 200,
-        "body": json.dumps({
-            "newest": len(newest),
-            "oldest": len(oldest),
-            "unique": len(merged),
-            "s3_key": key,
-        }),
+        "body": json.dumps(
+            {
+                "newest": len(newest),
+                "oldest": len(oldest),
+                "unique": len(merged),
+                "s3_key": key,
+            }
+        ),
     }
