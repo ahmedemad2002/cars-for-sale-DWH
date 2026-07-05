@@ -50,12 +50,22 @@ This project builds an end-to-end data pipeline that scrapes used car listings d
 ┌──────────────────────────────────────────────────────┐
 │  AWS Athena                                          │
 │  • Queries directly over S3 Parquet                  │
-│  • last_seen_date & days_listed computed on-the-fly  │
-│  • Views for fast-seller / slow-seller analysis      │
+│  • cars_scd_analytics view: days_listed, days_to_sell,│
+│    price_segment, feature_count, and other computed   │
+│    BI columns                                         │
 └─────────────────────────┬────────────────────────────┘
                           │
                           ▼
                Power BI (reporting layer)
+
+┌──────────────────────────────────────────────────────┐
+│  Lambda: EmailNotify                                 │
+│  • Triggered independently by its own EventBridge     │
+│    rule, ~30 min after the scrape CRON                │
+│  • Reads today's CloudWatch logs from all 3 pipeline  │
+│    functions, parses key metrics                      │
+│  • Publishes a daily digest email via SNS              │
+└──────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -115,16 +125,16 @@ The Gold table (`cars_scd.parquet`) schema:
 
 | Column | Type | Description |
 |---|---|---|
-| `id` | string | Dubizzle internal listing ID |
+| `id` | int64 | Dubizzle internal listing ID |
 | `externalID` | string | Public-facing ID (used in URL) |
 | `title` | string | Listing title |
 | `Price` | Float64 | Listed price (EGP) |
 | `Year` | Float64 | Model year |
 | `Kilometers` | Float64 | Odometer reading |
-| `Make` | string | Car manufacturer |
+| `Brand` | string | Car manufacturer |
 | `Model` | string | Car model |
 | `Body Type` | string | e.g. Sedan, SUV |
-| `Transmission` | string | Auto / Manual |
+| `Transmission Type` | string | Automatic / Manual |
 | `feature_*` | boolean | One column per extra feature; `NaN` = unknown |
 | `updatedAt` | string | ISO-8601 timestamp of last listing update |
 | `first_seen_date` | string | Date listing first appeared in the pipeline |
@@ -132,19 +142,23 @@ The Gold table (`cars_scd.parquet`) schema:
 | `scd_valid_to` | string | Date this row version was closed (`null` if active) |
 | `status` | string | `active` / `updated` / `deleted` |
 
+This is a high-level summary — see [`Raw Data/README.md`](Raw%20Data/README.md) for the full 82-column reference, including all `feature_*` flags and less commonly used fields.
+
 `last_seen_date` and `days_listed` are computed on-the-fly in Athena rather than stored — keeping the Gold table append-only and avoiding recomputation on every write.
 
 ---
 
 ## Analytical Use Cases
 
-Once the SCD table is built, Athena views answer questions like:
+Once the SCD table is built, the `cars_scd_analytics` Athena view computes BI-ready columns on top of it — `days_listed`, `days_to_sell`, `age_in_years`, `price_per_km`, `feature_count`, `has_premium_features`, `has_safety_suite`, `price_segment`, `mileage_category`, and `is_current_active` — to answer questions like:
 
 - **Fast sellers**: Active listings with `days_listed < N` before `status=deleted`
 - **Slow / stale inventory**: Active listings with `first_seen_date` more than X days ago
 - **Price sensitivity**: Do price-updated listings (`status=updated` with `Price` change) sell faster afterward?
 - **Make/model velocity**: Which makes and models turn over fastest in the Egyptian market?
 - **Seasonality**: Are there weekly or monthly patterns in listing volume or delisting rate?
+
+See [`Raw Data/README.md`](Raw%20Data/README.md#analytics-view-export-athena-viewcsv) for the full column reference of this view's export.
 
 ---
 
@@ -158,6 +172,7 @@ Once the SCD table is built, Athena views answer questions like:
 | Scheduling | Amazon EventBridge |
 | Data format | Parquet (snappy compression) via `pyarrow` |
 | Transformation | `pandas`, `boto3` |
+| Monitoring | Amazon CloudWatch Logs (parsed by `EmailNotify`), Amazon SNS (digest email delivery) |
 | Reporting | Power BI (DirectQuery over Athena) |
 
 ---
@@ -166,13 +181,20 @@ Once the SCD table is built, Athena views answer questions like:
 
 ```
 ├── Lambda Scripts/
-│   ├── DubizzleScrapeDay.py           # Scraper: hits Dubizzle API, saves raw JSON to Bronze
+│   ├── DubizzleScrapeDay.py           # Production scraper: hits Dubizzle API, saves raw JSON to Bronze
+│   ├── dubizzleLambda.py              # Standalone reference/template version of the scraper (no S3 config, hardcoded placeholders)
 │   ├── Bronze-to-Silver.py            # Transforms & types raw JSON → partitioned Parquet
-│   └── Silver-to-Gold.py              # SCD Type-2 merge into Gold history table
-├── Raw Data/                          # Local sample data (gitignored — too large to commit)
-│   ├── gold_layer_2026-04-05.parquet  # Snapshot of the parquet file saved in gold layer S3 bucket
-│   ├── gold 2026-04-05.csv            # CSV file to show the data in Excel
-│   └── gold 2026-04-05 sample.csv     # Sample of the CSV file to preview data without download
+│   ├── Silver-to-Gold.py              # SCD Type-2 merge into Gold history table
+│   ├── EmailNotify.py                 # Daily digest email via SNS, parses CloudWatch logs from the other 3 functions
+│   └── Test_gold_layer.py             # Gold-layer data-quality test suite (run locally or in CI/Lambda)
+├── Raw Data/                          # Sample data, tracked in git — only the latest snapshot plus the original legacy one are kept at a time to manage repo size
+│   ├── README.md                      # Full column reference + snapshot history
+│   ├── gold_layer_2026-04-05.parquet  # Legacy first snapshot (root-level, old naming convention)
+│   ├── gold 2026-04-05.csv
+│   ├── gold 2026-04-05 sample.csv
+│   └── 2026-07-05/                    # Latest snapshot
+│       ├── gold-layer.parquet / .csv / -sample.csv
+│       └── Athena View.csv            # Export of the cars_scd_analytics Athena view
 └── README.md
 ```
 
@@ -185,17 +207,18 @@ Configuration (credentials, S3 paths, API headers/payloads) is managed via a `co
 The pipeline runs entirely on AWS. To replicate it you will need:
 
 - Three S3 buckets (Bronze, Silver, Gold) or a single bucket with prefix-based separation
-- Three Lambda functions with the appropriate IAM roles (S3 read/write, Lambda invoke)
+- Four Lambda functions with the appropriate IAM roles (S3 read/write, Lambda invoke, plus CloudWatch/SNS for `EmailNotify`)
 - A `config.json` uploaded to S3 with the API endpoint, request headers, and payload templates
 - Environment variables set on each Lambda (bucket names, function names, `MIN_SILVER_ROWS`)
 - An EventBridge rule triggering `DubizzleScrapeDay` on your desired schedule
+- A second EventBridge rule triggering `EmailNotify` ~30 min after the scrape CRON, an SNS topic (subscribed to your email), and the following env vars on `EmailNotify`: `SCRAPE_LOG_GROUP`, `B2S_LOG_GROUP`, `S2G_LOG_GROUP`, `SNS_TOPIC_ARN`, `PIPELINE_TZ_OFFSET`. Required IAM permissions: `logs:FilterLogEvents`, `logs:DescribeLogStreams`, `sns:Publish`.
 
 ---
 
 ## Roadmap
 
-- [ ] Athena views for fast-seller and slow/unsold analysis
-- [ ] `days_listed` and `days_to_sell` analytical columns via Athena views
+- [x] Athena views for fast-seller and slow/unsold analysis
+- [x] `days_listed` and `days_to_sell` analytical columns via Athena views
 - [ ] Price history table (append-only change log, separate from SCD)
 - [ ] Scrape-gap buffer rule: require N consecutive missing days before marking a listing as `deleted`
 - [ ] More granular SCD change detection (column-level diff beyond `updatedAt`)

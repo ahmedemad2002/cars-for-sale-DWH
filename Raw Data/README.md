@@ -1,11 +1,13 @@
 # Gold Layer Data Documentation
 
-**File:** `gold_layer_2026-04-05.parquet` / `gold 2026-04-05.csv`  
-**Generated:** 2026-04-05  
-**Total rows:** 39,574  
+**Files:** `2026-07-05/gold-layer.parquet` / `gold-layer.xlsx`
+**Generated:** 2026-07-05
+**Total rows:** 132,951
 **Total columns:** 82
 
 This file is the Gold layer output of the `cars-for-sale-DWH` pipeline. Each row represents a **version** of a used car listing scraped from Dubizzle Egypt. A single listing can have multiple rows — one per state change — tracked using SCD Type-2 logic.
+
+> **Naming convention note:** Snapshots are organized as `Raw Data/YYYY-MM-DD/` folders, with files named generically (`gold-layer.parquet`, `.xlsx`, `-sample.csv`) since the folder itself carries the date. The very first snapshot (`gold_layer_2026-04-05.*`) predates this convention and still lives loose at the `Raw Data/` root with the date embedded in the filename — it's kept as-is for history rather than renamed.
 
 ---
 
@@ -132,19 +134,45 @@ These columns are added by the pipeline and are not part of the original listing
 
 ---
 
-## Row Count Breakdown (2026-04-05 snapshot)
+## Snapshot History
 
-| Metric | Value |
-|--------|-------|
-| Total rows | 39,574 |
-| Currently active rows (`status = active`) | 10,871 |
-| Closed rows (`status = updated` or `deleted`) | 28,703 |
+Raw Data snapshots are pulled periodically and committed for portfolio/demo purposes. Only the **latest** snapshot plus the original **legacy** snapshot are kept in the repo at any time — older ones are pruned to keep repo size manageable, but their stats are preserved here for a sense of the pipeline's growth over time.
+
+| Snapshot | Rows | Unique IDs | Active | Updated | Deleted | Notes |
+|---|---|---|---|---|---|---|
+| 2026-04-05 | 39,574 | — | 10,871 | 28,703 combined¹ | 28,703 combined¹ | Initial sample. Root-level, legacy filename convention. Kept in repo. |
+| 2026-04-16 | 51,231 | 30,521 | 11,504 | 17,938 | 21,789 | Pruned from repo 2026-07-05 — kept here for history only. |
+| 2026-07-05 | 132,951 | 66,773 | 13,274 | 56,816 | 62,861 | Current snapshot. Added `Athena View.csv` analytics export. |
+
+¹ The 2026-04-05 snapshot's original documentation only broke rows into active vs. closed (updated+deleted together), not split individually.
 
 ---
 
 ## Sample Records
 
-See `gold 2026-04-05 sample.csv` for 5 representative rows covering all three status values.
+See `2026-07-05/gold-layer-sample.csv` for 5 representative rows covering all three status values.
+
+---
+
+## Analytics View Export (`Athena View.csv`)
+
+This file is a materialized export of an Athena view (`cars_scd_analytics`) built on top of the Gold SCD table, adding computed business-intelligence columns for reporting. Column names in this export are lowercased (Athena convention), unlike the Gold Parquet/CSV above.
+
+| Column | Description |
+|---|---|
+| `last_seen_date` | Most recent date the listing was observed |
+| `days_listed` | Days from `first_seen_date` to `scd_valid_to` (or today, if still active) |
+| `days_to_sell` | Same as `days_listed`, but only populated for `status = deleted` rows — isolates true sales-cycle time |
+| `age_in_years` | Current year minus model `year` |
+| `price_per_km` | `price / kilometers` — normalizes price by wear |
+| `feature_count` | Count of `feature_*` columns present (true) on the listing |
+| `has_premium_features` | Whether the listing has at least one of: sunroof, navigation system, touch screen |
+| `has_safety_suite` | Whether the listing has all of: ABS, airbags, ESP, parking sensors |
+| `price_segment` | `Budget` (< 500k EGP) / `Mid` (500k–1.5M) / `Premium` (> 1.5M) |
+| `mileage_category` | `Low mileage` (< 50k km) / `Medium mileage` (50k–150k) / `High mileage` (> 150k) |
+| `is_current_active` | `True` if the listing is currently live (`status = active`, `scd_valid_to` is null) |
+
+All other columns (`id`, `externalid`, `title`, `brand`, `model`, `year`, `price`, `kilometers`, `power_hp`, `engine_cc`, `body_type`, `transmission_type`, `fuel_type`, `color`, `condition`, `status`, `first_seen_date`, `scd_valid_from`, `scd_valid_to`, `createdat`, `updatedat`) mirror the Gold table fields described above, just lowercased.
 
 ---
 
@@ -152,5 +180,6 @@ See `gold 2026-04-05 sample.csv` for 5 representative rows covering all three st
 
 - **Delisting ≠ guaranteed sale.** A listing disappearing from the scrape results is the best available proxy for a sale, since Dubizzle does not expose a "sold" status. Scraping gaps can also cause false delistings — a buffer rule requiring consecutive missing days before marking a listing as `deleted` is planned.
 - **`NaN` in feature columns ≠ `False`.** Do not impute feature flags as absent without understanding the seller's data entry behaviour.
+- **`has_premium_features` / `has_safety_suite` nulls ≠ `False`.** In the analytics export these come through as non-boolean (`object`) with substantial nulls (36,329 / 21,571 non-null out of 132,951) rather than clean booleans — consistent with three-valued logic (`AND`/`OR` over nullable `feature_*` inputs) propagating `NULL` when an input feature isn't known, rather than resolving to `False`.
 - **Multiple rows per listing is expected.** Filter on `status = 'active'` for the current live snapshot, or use `scd_valid_from` / `scd_valid_to` to reconstruct the state at any historical date.
 - **Prices are in Egyptian Pounds (EGP).** No currency conversion is applied.
