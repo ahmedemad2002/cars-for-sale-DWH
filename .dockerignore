@@ -1,0 +1,12 @@
+# Keep the dbt-runner image build context small — only the dbt project and
+# runner files are needed.
+.git/
+Raw Data/
+local/
+dubizzle_dbt/target/
+dubizzle_dbt/logs/
+dubizzle_dbt/dbt_packages/
+dubizzle_dbt/package-lock.yml
+*.parquet
+*.csv
+*.xlsx

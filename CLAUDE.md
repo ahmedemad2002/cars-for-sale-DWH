@@ -16,10 +16,14 @@ GitHub hard-blocks any pushed blob over 100MB. A full CSV export of the gold lay
 
 If a large CSV ever ends up committed, replacing it in a later commit is not enough — the oversized blob still lives in the earlier commit's history and will still block the push. It has to be removed from the commit that introduced it (e.g. via interactive rebase), not just superseded.
 
-## `local/` and `dubizzle_dbt/` are gitignored scratch/WIP
+## `local/` is gitignored scratch/WIP
 
-Both are excluded from git (`.gitignore`) and are working/experimental space:
-- `local/` — scratch notebooks, test data, Power BI files, ad-hoc configs.
-- `dubizzle_dbt/` — a scaffolded dbt project, still default boilerplate with no real models.
+Excluded from git (`.gitignore`): scratch notebooks, test data, Power BI files, ad-hoc configs. Don't reference it in the README files or treat its contents as authoritative/shipped.
 
-Don't reference either in the README files or treat their contents as authoritative/shipped — they're not part of the tracked project structure until they contain real, intentional work.
+## `dubizzle_dbt/` is a real, tracked project
+
+It holds the data-quality tests and the `cars_scd_analytics` model (see its README). Only its artifacts (`target/`, `dbt_packages/`, `logs/`) are gitignored. **Never commit a `profiles.yml`** — it's environment-specific and can leak account details; the local one lives in `~/.dbt/`, and the Lambda runner uses the env-var-driven template at `Lambda Scripts/dbt-runner/profiles.yml` (that template is the one intentional exception, tracked via a `.gitignore` negation).
+
+## Athena catalog facts (confirmed from the live account)
+
+Database `dubizzle`, gold table `cars_scd` (over `s3://dubizzle-gold/OneBigTable`), views `cars_scd_analytics` (dbt-managed) and `cars_analytics`. Region `eu-north-1`. Athena staging for dbt: `s3://dubizzle-gold/athena-results/`. The live `cars_scd_analytics` definition is the source of truth over any docs: it computes `days_listed`/`days_to_sell` from `createdat` (not `first_seen_date`), and its segment labels are `Mid-range` / `Low Mileage` / `Medium Mileage` / `High Mileage`.

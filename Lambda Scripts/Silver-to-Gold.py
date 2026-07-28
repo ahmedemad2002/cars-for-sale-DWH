@@ -8,6 +8,18 @@ import os
 import io
 
 s3 = boto3.client("s3")
+lambda_client = boto3.client("lambda")
+
+
+def invoke_next(function_name: str, payload: dict):
+    """Fire-and-forget async invoke of the next Lambda in the chain."""
+    lambda_client.invoke(
+        FunctionName=function_name,
+        InvocationType="Event",  # async — Silver-to-Gold doesn't wait
+        Payload=json.dumps(payload).encode(),
+    )
+    print(f"  → Invoked {function_name} asynchronously")
+
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 STATUS_ACTIVE = "active"
@@ -300,6 +312,15 @@ def lambda_handler(event, context):
             print(f"  ✗ {day_string} — {str(e)}")
             # For backfills we continue; for single-day runs this surfaces naturally
             continue
+
+    # Chain to the dbt data-quality runner once per invocation, only if at
+    # least one day saved successfully — no point testing unchanged Gold.
+    dbt_runner = os.environ.get("DBT_RUNNER_FUNCTION")
+    any_success = any(r["status"] == "success" for r in results)
+    if dbt_runner and any_success:
+        invoke_next(dbt_runner, {"trigger": "silver-to-gold"})
+    elif not dbt_runner:
+        print("  DBT_RUNNER_FUNCTION not set — skipping data-quality run")
 
     return {
         "statusCode": 200,

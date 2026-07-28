@@ -1,0 +1,45 @@
+version: 2
+
+models:
+  - name: cars_scd_analytics
+    description: >
+      BI-ready view over the Gold SCD table with computed duration,
+      depreciation, feature-aggregation, and segmentation columns.
+      Consumed by Power BI via Athena.
+    columns:
+      - name: days_listed
+        description: >
+          Days from listing creation (createdAt on Dubizzle) to delisting
+          (scd_valid_to), or to today for rows still open.
+        data_tests:
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+              config:
+                where: "days_listed is not null"
+
+      - name: price_segment
+        description: "Price tier: Budget < 500k EGP, Mid-range 500k-1.5M, Premium > 1.5M."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['Budget', 'Mid-range', 'Premium']
+              config:
+                where: "price is not null"
+
+      - name: mileage_category
+        description: "Odometer tier: Low < 50k km, Medium 50k-150k, High > 150k."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['Low Mileage', 'Medium Mileage', 'High Mileage']
+              config:
+                where: "kilometers is not null"
+
+      - name: days_to_sell
+        description: >
+          Days from creation to delisting; only populated for status=deleted
+          rows (the sales-cycle metric).
+
+      - name: is_current_active
+        description: True only for the single open row of a currently-live listing.

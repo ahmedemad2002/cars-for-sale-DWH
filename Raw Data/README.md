@@ -161,15 +161,15 @@ This file is a materialized export of an Athena view (`cars_scd_analytics`) buil
 | Column | Description |
 |---|---|
 | `last_seen_date` | Most recent date the listing was observed |
-| `days_listed` | Days from `first_seen_date` to `scd_valid_to` (or today, if still active) |
-| `days_to_sell` | Same as `days_listed`, but only populated for `status = deleted` rows — isolates true sales-cycle time |
+| `days_listed` | Days from listing creation (`createdAt` on Dubizzle) to `scd_valid_to` (or today, if still open) |
+| `days_to_sell` | Same basis as `days_listed`, but only populated for `status = deleted` rows — isolates true sales-cycle time |
 | `age_in_years` | Current year minus model `year` |
 | `price_per_km` | `price / kilometers` — normalizes price by wear |
 | `feature_count` | Count of `feature_*` columns present (true) on the listing |
 | `has_premium_features` | Whether the listing has at least one of: sunroof, navigation system, touch screen |
 | `has_safety_suite` | Whether the listing has all of: ABS, airbags, ESP, parking sensors |
-| `price_segment` | `Budget` (< 500k EGP) / `Mid` (500k–1.5M) / `Premium` (> 1.5M) |
-| `mileage_category` | `Low mileage` (< 50k km) / `Medium mileage` (50k–150k) / `High mileage` (> 150k) |
+| `price_segment` | `Budget` (< 500k EGP) / `Mid-range` (500k–1.5M) / `Premium` (> 1.5M) |
+| `mileage_category` | `Low Mileage` (< 50k km) / `Medium Mileage` (50k–150k) / `High Mileage` (> 150k) |
 | `is_current_active` | `True` if the listing is currently live (`status = active`, `scd_valid_to` is null) |
 
 All other columns (`id`, `externalid`, `title`, `brand`, `model`, `year`, `price`, `kilometers`, `power_hp`, `engine_cc`, `body_type`, `transmission_type`, `fuel_type`, `color`, `condition`, `status`, `first_seen_date`, `scd_valid_from`, `scd_valid_to`, `createdat`, `updatedat`) mirror the Gold table fields described above, just lowercased.

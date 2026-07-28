@@ -45,14 +45,22 @@ This project builds an end-to-end data pipeline that scrapes used car listings d
 │  • Handles schema evolution (new feature_* columns)  │
 │  • Overwrites single Gold Parquet file on S3         │
 └─────────────────────────┬────────────────────────────┘
-                          │
+                          │ async invoke
                           ▼
+┌──────────────────────────────────────────────────────┐
+│  Lambda: DbtRunner (container image)                 │
+│  • dbt build: rebuilds cars_scd_analytics view +      │
+│    runs 30 data-quality tests via Athena              │
+│  • dbt source freshness on _ingestionDate             │
+│  • Prints DBT PASS/FAIL/SUMMARY lines → CloudWatch    │
+└──────────────────────────────────────────────────────┘
+
 ┌──────────────────────────────────────────────────────┐
 │  AWS Athena                                          │
 │  • Queries directly over S3 Parquet                  │
-│  • cars_scd_analytics view: days_listed, days_to_sell,│
-│    price_segment, feature_count, and other computed   │
-│    BI columns                                         │
+│  • cars_scd_analytics view (dbt-managed):             │
+│    days_listed, days_to_sell, price_segment,          │
+│    feature_count, and other computed BI columns       │
 └─────────────────────────┬────────────────────────────┘
                           │
                           ▼
@@ -62,9 +70,10 @@ This project builds an end-to-end data pipeline that scrapes used car listings d
 │  Lambda: EmailNotify                                 │
 │  • Triggered independently by its own EventBridge     │
 │    rule, ~30 min after the scrape CRON                │
-│  • Reads today's CloudWatch logs from all 3 pipeline  │
+│  • Reads today's CloudWatch logs from all 4 pipeline  │
 │    functions, parses key metrics                      │
-│  • Publishes a daily digest email via SNS              │
+│  • Publishes a daily digest email via SNS —            │
+│    including a Data Quality section from dbt results   │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -116,6 +125,9 @@ The pipeline is a strict linear chain with no branching, parallelism, or retry-s
 
 **Delisting as sales signal**
 Dubizzle does not expose a "sold" status. A listing disappearing from the API — captured as `status=deleted` in Gold — is the best available proxy for a sale. This is the core analytical assumption of the project; a configurable buffer rule to handle single-day scrape gaps vs. confirmed delistings is on the roadmap.
+
+**dbt for data tests and the BI view**
+Data-quality checks live in a dbt project (`dubizzle_dbt/`) that runs after every Silver-to-Gold merge, testing the Gold table where it's actually consumed (Athena) rather than in pandas. Severity is split deliberately: SCD-integrity violations (duplicate active rows, overlapping periods) are **errors** — they mean the merge logic broke; seller-input junk (900M-km odometers) are **warnings** — chronic source noise that shouldn't redden the digest. dbt also owns the `cars_scd_analytics` view, so the BI layer's SQL is version-controlled instead of living in the Athena console.
 
 ---
 
@@ -172,6 +184,7 @@ See [`Raw Data/README.md`](Raw%20Data/README.md#analytics-view-export-athena-vie
 | Scheduling | Amazon EventBridge |
 | Data format | Parquet (snappy compression) via `pyarrow` |
 | Transformation | `pandas`, `boto3` |
+| Data quality & BI view | `dbt-core` + `dbt-athena` (tests + `cars_scd_analytics` model), packaged as a Lambda container image (ECR) |
 | Monitoring | Amazon CloudWatch Logs (parsed by `EmailNotify`), Amazon SNS (digest email delivery) |
 | Reporting | Power BI (DirectQuery over Athena) |
 
@@ -184,16 +197,21 @@ See [`Raw Data/README.md`](Raw%20Data/README.md#analytics-view-export-athena-vie
 │   ├── DubizzleScrapeDay.py           # Production scraper: hits Dubizzle API, saves raw JSON to Bronze
 │   ├── dubizzleLambda.py              # Standalone reference/template version of the scraper (no S3 config, hardcoded placeholders)
 │   ├── Bronze-to-Silver.py            # Transforms & types raw JSON → partitioned Parquet
-│   ├── Silver-to-Gold.py              # SCD Type-2 merge into Gold history table
-│   ├── EmailNotify.py                 # Daily digest email via SNS, parses CloudWatch logs from the other 3 functions
-│   └── Test_gold_layer.py             # Gold-layer data-quality test suite (run locally or in CI/Lambda)
+│   ├── Silver-to-Gold.py              # SCD Type-2 merge into Gold history table; chains to DbtRunner
+│   ├── dbt-runner/                    # DbtRunner Lambda: Dockerfile, handler.py, baked profiles.yml
+│   ├── EmailNotify.py                 # Daily digest email via SNS, parses CloudWatch logs from the other functions
+│   └── Test_gold_layer.py             # Pandas-level test suite for ad-hoc parquet checks (SQL-level tests live in dubizzle_dbt/)
+├── dubizzle_dbt/                      # dbt project: data tests + cars_scd_analytics model (see its README)
+│   ├── models/staging/sources.yml     # cars_scd source definition + generic tests + freshness
+│   ├── models/marts/                  # cars_scd_analytics.sql + model tests
+│   └── tests/                         # Singular SQL tests (SCD integrity, business rules)
 ├── Raw Data/                          # Sample data, tracked in git — only the latest snapshot plus the original legacy one are kept at a time to manage repo size
 │   ├── README.md                      # Full column reference + snapshot history
 │   ├── gold_layer_2026-04-05.parquet  # Legacy first snapshot (root-level, old naming convention)
 │   ├── gold 2026-04-05.csv
 │   ├── gold 2026-04-05 sample.csv
 │   └── 2026-07-05/                    # Latest snapshot
-│       ├── gold-layer.parquet / .csv / -sample.csv
+│       ├── gold-layer.parquet / .xlsx / -sample.csv
 │       └── Athena View.csv            # Export of the cars_scd_analytics Athena view
 └── README.md
 ```
@@ -207,11 +225,12 @@ Configuration (credentials, S3 paths, API headers/payloads) is managed via a `co
 The pipeline runs entirely on AWS. To replicate it you will need:
 
 - Three S3 buckets (Bronze, Silver, Gold) or a single bucket with prefix-based separation
-- Four Lambda functions with the appropriate IAM roles (S3 read/write, Lambda invoke, plus CloudWatch/SNS for `EmailNotify`)
+- Five Lambda functions with the appropriate IAM roles (S3 read/write, Lambda invoke, plus CloudWatch/SNS for `EmailNotify`, plus Athena/Glue for `DbtRunner`)
 - A `config.json` uploaded to S3 with the API endpoint, request headers, and payload templates
 - Environment variables set on each Lambda (bucket names, function names, `MIN_SILVER_ROWS`)
 - An EventBridge rule triggering `DubizzleScrapeDay` on your desired schedule
-- A second EventBridge rule triggering `EmailNotify` ~30 min after the scrape CRON, an SNS topic (subscribed to your email), and the following env vars on `EmailNotify`: `SCRAPE_LOG_GROUP`, `B2S_LOG_GROUP`, `S2G_LOG_GROUP`, `SNS_TOPIC_ARN`, `PIPELINE_TZ_OFFSET`. Required IAM permissions: `logs:FilterLogEvents`, `logs:DescribeLogStreams`, `sns:Publish`.
+- A second EventBridge rule triggering `EmailNotify` ~30 min after the scrape CRON, an SNS topic (subscribed to your email), and the following env vars on `EmailNotify`: `SCRAPE_LOG_GROUP`, `B2S_LOG_GROUP`, `S2G_LOG_GROUP`, `DBT_LOG_GROUP` (optional), `SNS_TOPIC_ARN`, `PIPELINE_TZ_OFFSET`. Required IAM permissions: `logs:FilterLogEvents`, `logs:DescribeLogStreams`, `sns:Publish`.
+- The `DbtRunner` Lambda deployed from a container image (see `Lambda Scripts/dbt-runner/Dockerfile`; build from the repo root, push to ECR). Env vars: `DBT_ATHENA_REGION`, `DBT_ATHENA_SCHEMA`, `DBT_ATHENA_S3_STAGING`. IAM: Athena query execution, Glue catalog read/write (view creation), and S3 read/write on the gold bucket + staging prefix. Set `DBT_RUNNER_FUNCTION` on `Silver-to-Gold` to enable the chain (skipped gracefully if unset). Recommended: memory ≥ 1024 MB, timeout ≥ 5 min.
 
 ---
 
@@ -219,6 +238,7 @@ The pipeline runs entirely on AWS. To replicate it you will need:
 
 - [x] Athena views for fast-seller and slow/unsold analysis
 - [x] `days_listed` and `days_to_sell` analytical columns via Athena views
+- [x] Automated data-quality tests (dbt) after each daily run, results in the daily digest
 - [ ] Price history table (append-only change log, separate from SCD)
 - [ ] Scrape-gap buffer rule: require N consecutive missing days before marking a listing as `deleted`
 - [ ] More granular SCD change detection (column-level diff beyond `updatedAt`)

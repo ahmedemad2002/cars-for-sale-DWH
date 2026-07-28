@@ -1,0 +1,11 @@
+# Baked into the runner image. All values overridable via Lambda env vars.
+dubizzle_dbt:
+  target: prod
+  outputs:
+    prod:
+      type: athena
+      region_name: "{{ env_var('DBT_ATHENA_REGION', 'eu-north-1') }}"
+      database: awsdatacatalog
+      schema: "{{ env_var('DBT_ATHENA_SCHEMA', 'dubizzle') }}"
+      s3_staging_dir: "{{ env_var('DBT_ATHENA_S3_STAGING', 's3://dubizzle-gold/athena-results/') }}"
+      threads: 4

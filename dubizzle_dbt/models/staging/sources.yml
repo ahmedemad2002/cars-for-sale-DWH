@@ -1,0 +1,119 @@
+version: 2
+
+sources:
+  - name: dubizzle
+    description: >
+      Gold layer of the cars-for-sale-DWH pipeline. Produced daily by the
+      Silver-to-Gold Lambda (SCD Type-2 merge over scraped Dubizzle Egypt
+      listings) as a single Parquet file on S3, registered in Glue.
+    schema: dubizzle
+    config:
+      freshness:
+        warn_after: {count: 30, period: hour}
+        error_after: {count: 54, period: hour}
+      loaded_at_field: cast("_ingestiondate" as timestamp)
+    tables:
+      - name: cars_scd
+        description: >
+          SCD Type-2 history table. One row per version of a listing;
+          a listing gets a new row when its updatedAt changes and its old
+          row is closed. status=deleted (delisting) is the proxy for a sale.
+
+          Severity philosophy: pipeline/SCD-integrity violations are errors;
+          seller-input plausibility violations (junk prices, odometer
+          keyboard-mash) are warnings — they are chronic low-level noise in
+          the source data, not pipeline defects.
+        columns:
+          - name: id
+            description: Dubizzle internal listing ID (unique per listing, not per row).
+            data_tests:
+              - not_null
+
+          - name: title
+            description: Listing title as written by the seller.
+            data_tests:
+              - not_null
+
+          - name: status
+            description: Row state — active (live), updated (superseded version), deleted (delisted, likely sold).
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['active', 'updated', 'deleted']
+
+          - name: first_seen_date
+            description: Date the listing first appeared in the pipeline (YYYY-MM-DD string).
+            data_tests:
+              - not_null
+
+          - name: scd_valid_from
+            description: Date this row version became active (YYYY-MM-DD string).
+            data_tests:
+              - not_null
+
+          - name: price
+            description: Listed price in EGP. Bounds mirror Test_gold_layer.py (junk below 10k, ceiling 50M).
+            data_tests:
+              - dbt_utils.accepted_range:
+                  arguments:
+                    min_value: 10000
+                    max_value: 50000000
+                  config:
+                    severity: warn
+                    where: "price is not null"
+
+          - name: year
+            description: Model year. Next model year is allowed. Warn-only — out-of-range values are seller junk, not pipeline bugs.
+            data_tests:
+              - dbt_utils.accepted_range:
+                  arguments:
+                    min_value: 1960
+                    max_value: "year(current_date) + 1"
+                  config:
+                    severity: warn
+                    where: "year is not null"
+
+          - name: kilometers
+            description: Odometer reading. Warn-only — values like 900M km are seller keyboard-mash.
+            data_tests:
+              - dbt_utils.accepted_range:
+                  arguments:
+                    min_value: 0
+                    max_value: 1500000
+                  config:
+                    severity: warn
+                    where: "kilometers is not null"
+
+          - name: power (hp)
+            quote: true
+            description: Engine power in horsepower.
+            data_tests:
+              - dbt_utils.accepted_range:
+                  arguments:
+                    min_value: 0
+                    inclusive: false
+                    max_value: 1500
+                  config:
+                    severity: warn
+                    where: '"power (hp)" is not null'
+
+          - name: engine capacity (cc)
+            quote: true
+            description: Engine displacement in cubic centimetres.
+            data_tests:
+              - dbt_utils.accepted_range:
+                  arguments:
+                    min_value: 0
+                    inclusive: false
+                    max_value: 10000
+                  config:
+                    severity: warn
+                    where: '"engine capacity (cc)" is not null'
+
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              arguments:
+                combination_of_columns:
+                  - id
+                  - scd_valid_from

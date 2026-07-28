@@ -1,2 +1,12 @@
 local/
-dubizzle_dbt/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# dbt — artifacts and environment-specific config only; the project is tracked
+dubizzle_dbt/target/
+dubizzle_dbt/dbt_packages/
+dubizzle_dbt/logs/
+profiles.yml
+!Lambda Scripts/dbt-runner/profiles.yml

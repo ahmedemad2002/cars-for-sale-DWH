@@ -2,7 +2,7 @@
 DailyDigestEmail Lambda
 ────────────────────────────────────────────────────────────────────────────────
 Triggered by EventBridge ~30 min after the scrape CRON.
-Reads today's CloudWatch logs from all 3 pipeline functions,
+Reads today's CloudWatch logs from all 4 pipeline functions,
 parses key metrics from their print() output, and sends a
 formatted summary email via SNS.
 
@@ -10,12 +10,14 @@ Required environment variables:
     SCRAPE_LOG_GROUP       e.g. /aws/lambda/DubizzleScrapeDay
     B2S_LOG_GROUP          e.g. /aws/lambda/Bronze-to-Silver
     S2G_LOG_GROUP          e.g. /aws/lambda/Silver-to-Gold
+    DBT_LOG_GROUP          e.g. /aws/lambda/DbtRunner (optional — section
+                           shows "not configured" if unset)
     SNS_TOPIC_ARN          ARN of the SNS topic subscribed to your email
     PIPELINE_TZ_OFFSET     Hours offset from UTC for display (e.g. "3" for Cairo = UTC+3)
 
 Required IAM permissions:
-    logs:FilterLogEvents   on each of the 3 log groups
-    logs:DescribeLogStreams on each of the 3 log groups
+    logs:FilterLogEvents   on each of the log groups
+    logs:DescribeLogStreams on each of the log groups
     sns:Publish            on the SNS topic
 """
 
@@ -197,6 +199,38 @@ def parse_silver_to_gold(lines: list[str]) -> dict:
     }
 
 
+def parse_dbt(lines: list[str]) -> dict:
+    """
+    Parse DbtRunner logs.
+    Looks for:
+        "DBT SUMMARY: passed=N warned=N failed=N errored=N skipped=N"
+        "DBT FAIL  <test_name> (N rows)"
+        "DBT WARN  <test_name> (N rows)"
+        "DBT ERROR <test_name> — <message>"
+    """
+    summary_rx = r"DBT SUMMARY: passed=(\d+) warned=(\d+) failed=(\d+) errored=(\d+)"
+    passed = first_match(lines, summary_rx, group=1)
+    warned = first_match(lines, summary_rx, group=2)
+    failed = first_match(lines, summary_rx, group=3)
+    errored = first_match(lines, summary_rx, group=4)
+
+    joined = "\n".join(lines)
+    failing_tests = re.findall(r"DBT FAIL\s+(\S+)(?: \((\d+) rows\))?", joined)
+    warning_tests = re.findall(r"DBT WARN\s+(\S+)(?: \((\d+) rows\))?", joined)
+    error_tests = re.findall(r"DBT ERROR\s+(\S+)", joined)
+
+    return {
+        "invoked": invoked_today(lines),
+        "passed": passed,
+        "warned": warned,
+        "failed": failed,
+        "errored": errored,
+        "failing_tests": failing_tests,  # list of (name, n_rows)
+        "warning_tests": warning_tests,  # list of (name, n_rows)
+        "error_tests": error_tests,  # list of names
+    }
+
+
 # ── Email formatter ───────────────────────────────────────────────────────────
 
 
@@ -207,10 +241,21 @@ def fmt(val, suffix="", fallback="—") -> str:
     return f"{int(val):,}{suffix}" if str(val).isdigit() else f"{val}{suffix}"
 
 
-def build_email(date_str: str, scrape: dict, b2s: dict, s2g: dict) -> tuple[str, str]:
+def build_email(
+    date_str: str, scrape: dict, b2s: dict, s2g: dict, dbt: dict | None = None
+) -> tuple[str, str]:
     """
     Returns (subject, body) for the SNS email.
     """
+    dbt_ok = (
+        dbt is None  # section not configured — don't fail the digest over it
+        or (
+            dbt["invoked"]
+            and not dbt["failing_tests"]
+            and not dbt["error_tests"]
+        )
+    )
+
     # Determine overall pipeline status
     all_ok = (
         scrape["invoked"]
@@ -222,6 +267,7 @@ def build_email(date_str: str, scrape: dict, b2s: dict, s2g: dict) -> tuple[str,
         and s2g["invoked"]
         and s2g["saved"]
         and not s2g["errors"]
+        and dbt_ok
     )
     status_icon = "✅" if all_ok else "⚠️"
 
@@ -307,6 +353,37 @@ def build_email(date_str: str, scrape: dict, b2s: dict, s2g: dict) -> tuple[str,
             for e in s2g["errors"][:5]:
                 s2g_block += f"   {e}\n"
 
+    # ── Section 4: Data Quality (dbt) ─────────────────────────────────────────
+    if dbt is None:
+        dbt_block = "\n💤  Data Quality (dbt) — not configured"
+    elif not dbt["invoked"]:
+        dbt_block = "\n❌  Data Quality (dbt)\n   Runner was NOT invoked today"
+    else:
+        dbt_icon = "✅" if (not dbt["failing_tests"] and not dbt["error_tests"]) else "⚠️"
+        dbt_block = f"""
+{dbt_icon}  Data Quality (dbt)
+   Tests passed        : {fmt(dbt['passed'])}
+   Warnings            : {fmt(dbt['warned'])}
+   Failures            : {fmt(dbt['failed'])}
+   Errors              : {fmt(dbt['errored'])}"""
+
+        if dbt["failing_tests"]:
+            dbt_block += "\n\n   Failing tests:\n"
+            for name, n_rows in dbt["failing_tests"][:5]:
+                rows = f" ({n_rows} rows)" if n_rows else ""
+                dbt_block += f"   ✗ {name}{rows}\n"
+
+        if dbt["warning_tests"]:
+            dbt_block += "\n   Warning tests:\n"
+            for name, n_rows in dbt["warning_tests"][:5]:
+                rows = f" ({n_rows} rows)" if n_rows else ""
+                dbt_block += f"   ⚠ {name}{rows}\n"
+
+        if dbt["error_tests"]:
+            dbt_block += "\n   Errored:\n"
+            for name in dbt["error_tests"][:5]:
+                dbt_block += f"   ✗ {name}\n"
+
     # ── Footer ────────────────────────────────────────────────────────────────
     tz_offset = int(os.environ.get("PIPELINE_TZ_OFFSET", "0"))
     local_time = datetime.now(timezone.utc) + timedelta(hours=tz_offset)
@@ -321,6 +398,9 @@ def build_email(date_str: str, scrape: dict, b2s: dict, s2g: dict) -> tuple[str,
 
 {sep}
 {s2g_block}
+
+{sep}
+{dbt_block}
 
 {sep}
 {footer}
@@ -343,6 +423,7 @@ def lambda_handler(event, context):
     scrape_log = os.environ["SCRAPE_LOG_GROUP"]
     b2s_log = os.environ["B2S_LOG_GROUP"]
     s2g_log = os.environ["S2G_LOG_GROUP"]
+    dbt_log = os.environ.get("DBT_LOG_GROUP")  # optional
 
     # Fetch logs
     print("Fetching scrape logs...")
@@ -357,13 +438,20 @@ def lambda_handler(event, context):
     s2g_lines = get_today_log_events(s2g_log, date_str)
     print(f"  {len(s2g_lines)} lines")
 
+    dbt = None
+    if dbt_log:
+        print("Fetching DbtRunner logs...")
+        dbt_lines = get_today_log_events(dbt_log, date_str)
+        print(f"  {len(dbt_lines)} lines")
+        dbt = parse_dbt(dbt_lines)
+
     # Parse
     scrape = parse_scrape(scrape_lines)
     b2s = parse_bronze_to_silver(b2s_lines)
     s2g = parse_silver_to_gold(s2g_lines)
 
     # Build and send
-    subject, body = build_email(date_str, scrape, b2s, s2g)
+    subject, body = build_email(date_str, scrape, b2s, s2g, dbt)
 
     print("Publishing to SNS...")
     print(f"Subject: {subject}")
