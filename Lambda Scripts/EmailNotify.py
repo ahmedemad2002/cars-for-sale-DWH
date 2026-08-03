@@ -33,14 +33,18 @@ sns = boto3.client("sns")
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def get_today_log_events(log_group: str, date_str: str) -> list[str]:
+def get_today_log_events(log_group: str, date_str: str, tz_offset: int = 0) -> list[str]:
     """
     Pull all log events for today from the given log group.
-    Searches the window: today 00:00 UTC → today 23:59 UTC.
-    Returns a flat list of message strings.
+    `date_str` is a local-calendar date (per PIPELINE_TZ_OFFSET), so the window
+    is built from local midnight → local midnight, not UTC midnight → UTC
+    midnight — otherwise a run that lands near the UTC day boundary (e.g. the
+    last Lambda in the chain, which runs latest) can fall just outside the
+    window while everything upstream of it still matches.
     """
     # Build time window in milliseconds
-    today = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    local_midnight = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    today = local_midnight - timedelta(hours=tz_offset)
     start_ms = int(today.timestamp() * 1000)
     end_ms = int((today + timedelta(days=1)).timestamp() * 1000) - 1
 
@@ -219,8 +223,14 @@ def parse_dbt(lines: list[str]) -> dict:
     warning_tests = re.findall(r"DBT WARN\s+(\S+)(?: \((\d+) rows\))?", joined)
     error_tests = re.findall(r"DBT ERROR\s+(\S+)", joined)
 
+    # A failed FilterLogEvents call (e.g. missing IAM on this log group) gets
+    # swallowed into the message list by get_today_log_events. Without this the
+    # section looks "invoked" with every counter None — i.e. silently all dashes.
+    fetch_error = next((l for l in lines if l.startswith("[ERROR reading logs:")), None)
+
     return {
         "invoked": invoked_today(lines),
+        "fetch_error": fetch_error,
         "passed": passed,
         "warned": warned,
         "failed": failed,
@@ -251,6 +261,8 @@ def build_email(
         dbt is None  # section not configured — don't fail the digest over it
         or (
             dbt["invoked"]
+            and not dbt.get("fetch_error")
+            and dbt["passed"] is not None
             and not dbt["failing_tests"]
             and not dbt["error_tests"]
         )
@@ -358,6 +370,18 @@ def build_email(
         dbt_block = "\n💤  Data Quality (dbt) — not configured"
     elif not dbt["invoked"]:
         dbt_block = "\n❌  Data Quality (dbt)\n   Runner was NOT invoked today"
+    elif dbt.get("fetch_error"):
+        dbt_block = (
+            "\n⚠️  Data Quality (dbt)\n"
+            f"   Could not read runner logs: {dbt['fetch_error']}"
+        )
+    elif dbt["passed"] is None:
+        dbt_block = (
+            "\n⚠️  Data Quality (dbt)\n"
+            "   Runner logged today but never printed a DBT SUMMARY line —\n"
+            "   it was likely still running (or timed out) when this digest\n"
+            "   was sent. Check the DbtRunner log group directly."
+        )
     else:
         dbt_icon = "✅" if (not dbt["failing_tests"] and not dbt["error_tests"]) else "⚠️"
         dbt_block = f"""
@@ -427,21 +451,21 @@ def lambda_handler(event, context):
 
     # Fetch logs
     print("Fetching scrape logs...")
-    scrape_lines = get_today_log_events(scrape_log, date_str)
+    scrape_lines = get_today_log_events(scrape_log, date_str, tz_offset)
     print(f"  {len(scrape_lines)} lines")
 
     print("Fetching Bronze-to-Silver logs...")
-    b2s_lines = get_today_log_events(b2s_log, date_str)
+    b2s_lines = get_today_log_events(b2s_log, date_str, tz_offset)
     print(f"  {len(b2s_lines)} lines")
 
     print("Fetching Silver-to-Gold logs...")
-    s2g_lines = get_today_log_events(s2g_log, date_str)
+    s2g_lines = get_today_log_events(s2g_log, date_str, tz_offset)
     print(f"  {len(s2g_lines)} lines")
 
     dbt = None
     if dbt_log:
         print("Fetching DbtRunner logs...")
-        dbt_lines = get_today_log_events(dbt_log, date_str)
+        dbt_lines = get_today_log_events(dbt_log, date_str, tz_offset)
         print(f"  {len(dbt_lines)} lines")
         dbt = parse_dbt(dbt_lines)
 
